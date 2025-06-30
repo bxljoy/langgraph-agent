@@ -1,3 +1,20 @@
+# ============================================================================
+# ⚠️  DEPRECATED: Use workflow_manager.py instead!
+# ============================================================================
+# This file contains the OLD regex-based query analysis approach.
+# The NEW LLM-powered system is in workflow_manager.py with these benefits:
+# 
+# ✅ Works for ANY domain (not just investments)
+# ✅ Uses DeepSeek reasoner for intelligent analysis  
+# ✅ Generates personalized follow-up questions
+# ✅ ChatGPT-style proactive query understanding
+#
+# To use the advanced system:
+#   from workflow_manager import create_investment_advisor
+#   agent = create_investment_advisor()
+#   agent.run_query("your question here")
+# ============================================================================
+
 from dotenv import load_dotenv
 import os
 import re

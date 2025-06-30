@@ -83,66 +83,115 @@ class AIAgentWorkflow:
     
     def analyze_user_query(self, state):
         """
-        Proactive query analysis to route specialized queries to clarification.
-        Detects investment queries and checks if they need more specificity.
+        🧠 INTELLIGENT QUERY ANALYSIS using LLM (ChatGPT style)
+        
+        Uses DeepSeek reasoner to determine if ANY query needs clarification.
+        Works for all topics, not just investments.
         """
         messages = state.get('messages', [])
         if not messages:
             return "proceed_to_agent"
         
-        user_message = messages[0].content if messages else ""
+        # Get the user's query
+        user_message = None
+        for msg in reversed(messages):
+            if isinstance(msg, HumanMessage):
+                user_message = msg.content
+                break
         
-        # Investment query detection patterns
-        investment_patterns = [
-            r'\b(recommend|suggest|advice|tips)\b.*\b(stock|invest|investment|portfolio|trading)\b',
-            r'\b(good|best|top)\b.*\b(stock|investment|shares|equity)\b',
-            r'\b(what|which|where)\b.*\b(invest|investment|stock|portfolio)\b',
-            r'\b(buy|purchase|acquire)\b.*\b(stock|shares|investment)\b',
-        ]
+        if not user_message:
+            return "proceed_to_agent"
         
-        is_investment_query = any(re.search(pattern, user_message, re.IGNORECASE) 
-                                for pattern in investment_patterns)
+        # Create analyzer model (separate from main model for analysis)
+        analyzer_model = ChatDeepSeek(
+            model="deepseek-reasoner", 
+            api_key=self.api_key, 
+            temperature=0.1
+        )
         
-        if is_investment_query:
-            # Check if query has sufficient detail
-            specificity_indicators = [
-                r'\b(risk tolerance|conservative|aggressive|moderate)\b',
-                r'\b(\$\d+|amount|budget|range)\b',
-                r'\b(short.term|long.term|time horizon|years?)\b',
-                r'\b(sector|industry|tech|healthcare|finance)\b',
-                r'\b(dividend|growth|income|value)\b',
-                r'\b(US|international|emerging|market)\b'
-            ]
+        # LLM Analysis Prompt (this is the key to ChatGPT-like behavior!)
+        analysis_prompt = f"""You are a query analysis expert. Your job is to determine if a user's question needs clarification to provide the best possible answer.
+
+USER QUERY: "{user_message}"
+
+Analyze this query and determine:
+1. Is this query specific enough to provide a comprehensive answer?
+2. What important details are missing that would help give a better response?
+3. Would asking follow-up questions significantly improve the answer quality?
+
+Guidelines for when to ask for clarification:
+- Query is too broad/vague (e.g., "help me with investing" vs "recommend conservative tech stocks for retirement")
+- Missing critical context for personalized advice (investment, career, health, legal advice)
+- Question could benefit from understanding user's specific situation
+- Multiple approaches possible without knowing user preferences
+- Personal recommendations that depend on individual circumstances
+
+Guidelines for when NOT to ask for clarification:
+- Factual questions with clear answers (e.g., "What is the capital of France?")
+- Specific technical questions (e.g., "How to install Python on macOS?")
+- General information requests that don't require personalization
+
+Respond with a JSON object:
+{{
+    "needs_clarification": true/false,
+    "reason": "brief explanation of why clarification is needed",
+    "follow_up_questions": ["question1", "question2", "question3"]
+}}
+
+Be selective - only ask for clarification when it would genuinely improve the answer quality."""
+
+        try:
+            # Ask DeepSeek to analyze the query
+            analysis_response = analyzer_model.invoke([
+                HumanMessage(content=analysis_prompt)
+            ])
             
-            has_specifics = any(re.search(indicator, user_message, re.IGNORECASE) 
-                              for indicator in specificity_indicators)
+            # Parse the LLM's analysis
+            analysis_text = analysis_response.content
             
-            if not has_specifics:
-                return "need_investment_clarification"
+            # Extract JSON from the response
+            start_idx = analysis_text.find('{')
+            end_idx = analysis_text.rfind('}') + 1
+            
+            if start_idx != -1 and end_idx != -1:
+                json_str = analysis_text[start_idx:end_idx]
+                import json
+                analysis = json.loads(json_str)
+                
+                # Store analysis in instance variable for smart_clarification to use
+                if analysis.get('needs_clarification', False):
+                    self._current_analysis = analysis
+                    return "need_smart_clarification"
+            
+        except Exception as e:
+            print(f"Query analysis error: {e}")
+            # Fallback to proceeding normally
         
         return "proceed_to_agent"
     
-    def investment_clarification(self, state):
-        """Specialized clarification for investment queries."""
+    def smart_clarification(self, state):
+        """
+        🎯 DYNAMIC CLARIFICATION using LLM analysis
+        Generates personalized follow-up questions based on the query type.
+        """
+        # Get analysis from instance variable (stored by analyze_user_query)
+        analysis = getattr(self, '_current_analysis', {})
+        follow_up_questions = analysis.get('follow_up_questions', [])
+        reason = analysis.get('reason', 'I need more information to help you better.')
+        
+        # Format the follow-up questions nicely
+        questions_text = ""
+        if follow_up_questions:
+            questions_text = "\n\n**To give you the best recommendations, could you please share:**\n\n"
+            for i, question in enumerate(follow_up_questions, 1):
+                questions_text += f"{i}. {question}\n"
+        
         clarification_msg = AIMessage(
-            content="""I'd be happy to help you with investment recommendations! To provide the most suitable suggestions for your situation, I need to understand your specific needs better.
+            content=f"""{reason}{questions_text}
 
-**📊 Investment Profile:**
-• **Risk Tolerance**: Are you comfortable with high-risk/high-reward investments, or do you prefer conservative, stable options?
-• **Time Horizon**: Are you investing for the short-term (1-2 years), medium-term (3-7 years), or long-term (8+ years)?
-• **Investment Amount**: What's your approximate budget or investment range?
-
-**🌍 Preferences:**
-• **Geographic Focus**: Are you interested in US stocks, international markets, or emerging markets?
-• **Sector Preferences**: Any specific industries you're interested in (tech, healthcare, energy, etc.) or want to avoid?
-• **Current Portfolio**: Do you already have investments, or is this a fresh start?
-
-**🎯 Goals:**
-• **Primary Objective**: Are you looking for growth, income (dividends), or a balanced approach?
-• **Special Considerations**: Any ESG (environmental/social) preferences or other criteria?
-
-The more details you provide, the better I can tailor my recommendations to your specific needs and goals!"""
+The more specific details you provide, the more tailored and useful my recommendations will be! 🎯"""
         )
+        
         return {"messages": [clarification_msg]}
     
     def should_continue(self, state):
@@ -239,7 +288,7 @@ The more details you provide, the better I can tailor my recommendations to your
         workflow.add_node("agent", self.call_model)
         workflow.add_node("action", self.call_tool)
         workflow.add_node("clarification", self.ask_for_clarification)
-        workflow.add_node("investment_clarification", self.investment_clarification)
+        workflow.add_node("smart_clarification", self.smart_clarification)
         workflow.add_node("human_handoff", self.human_handoff)
         
         # Set entry point
@@ -252,13 +301,13 @@ The more details you provide, the better I can tailor my recommendations to your
     
     def _add_workflow_edges(self, workflow: StateGraph):
         """Configure all workflow edges."""
-        # Conditional edges from query router
+        # Conditional edges from query router (LLM-powered!)
         workflow.add_conditional_edges(
             "query_router",
             self.analyze_user_query,
             {
                 "proceed_to_agent": "agent",
-                "need_investment_clarification": "investment_clarification",
+                "need_smart_clarification": "smart_clarification",
             },
         )
         
@@ -277,7 +326,7 @@ The more details you provide, the better I can tailor my recommendations to your
         # Regular edges
         workflow.add_edge("action", "agent")
         workflow.add_edge("clarification", END)
-        workflow.add_edge("investment_clarification", END)
+        workflow.add_edge("smart_clarification", END)  # Wait for user's detailed response
         workflow.add_edge("human_handoff", END)
     
     def compile_workflow(self):
@@ -364,6 +413,245 @@ The more details you provide, the better I can tailor my recommendations to your
         self.app = None
 
 # ============================================================================
+# CONVERSATION SESSION MANAGER
+# ============================================================================
+
+class ConversationSession:
+    """
+    🗣️ MULTI-TURN CONVERSATION MANAGER
+    
+    Handles conversation continuity across clarification cycles.
+    Maintains context and allows users to respond to follow-up questions.
+    """
+    
+    def __init__(self, agent: AIAgentWorkflow):
+        """
+        Initialize conversation session.
+        
+        Args:
+            agent: The AIAgentWorkflow instance to use
+        """
+        self.agent = agent
+        self.conversation_history = []
+        self.waiting_for_clarification = False
+        self.last_clarification_type = None
+        
+    def start_conversation(self, initial_query: str, verbose: bool = True) -> Dict[str, Any]:
+        """
+        Start a new conversation with an initial query.
+        
+        Args:
+            initial_query: The user's initial question
+            verbose: Whether to print outputs
+            
+        Returns:
+            Dict containing response and conversation state
+        """
+        print(f"🚀 Starting conversation: '{initial_query}'")
+        
+        # Clear any previous conversation
+        self.conversation_history = []
+        self.waiting_for_clarification = False
+        
+        # Add initial query to history
+        initial_message = HumanMessage(content=initial_query)
+        self.conversation_history.append(initial_message)
+        
+        # Run the workflow
+        result = self._run_workflow_with_history(verbose)
+        
+        # Check if we're waiting for clarification
+        self._update_conversation_state(result)
+        
+        return {
+            "response": self._extract_response(result),
+            "waiting_for_clarification": self.waiting_for_clarification,
+            "conversation_id": id(self),
+            "message_count": len(self.conversation_history)
+        }
+    
+    def continue_conversation(self, user_response: str, verbose: bool = True) -> Dict[str, Any]:
+        """
+        Continue conversation after user provides clarification details.
+        
+        Args:
+            user_response: User's response to clarification questions
+            verbose: Whether to print outputs
+            
+        Returns:
+            Dict containing response and updated conversation state
+        """
+        if not self.waiting_for_clarification:
+            return {
+                "error": "Not waiting for clarification. Use start_conversation() for new queries.",
+                "waiting_for_clarification": False
+            }
+        
+        print(f"💬 Continuing conversation with: '{user_response[:100]}...'")
+        
+        # Add user's clarification response to history
+        clarification_message = HumanMessage(content=user_response)
+        self.conversation_history.append(clarification_message)
+        
+        # Reset clarification state
+        self.waiting_for_clarification = False
+        
+        # Run workflow again with enriched context
+        result = self._run_workflow_with_history(verbose)
+        
+        # Check if we need more clarification (unlikely but possible)
+        self._update_conversation_state(result)
+        
+        return {
+            "response": self._extract_response(result),
+            "waiting_for_clarification": self.waiting_for_clarification,
+            "conversation_id": id(self),
+            "message_count": len(self.conversation_history)
+        }
+    
+    def _run_workflow_with_history(self, verbose: bool) -> Dict[str, Any]:
+        """Run the workflow with full conversation history."""
+        app = self.agent.compile_workflow()
+        inputs = {"messages": self.conversation_history.copy()}
+        
+        results = []
+        for output in app.stream(inputs):
+            if verbose:
+                for key, value in output.items():
+                    if key != "query_router":  # Skip empty router output
+                        print(f"Output from node '{key}':")
+                        print("---")
+                        print(value)
+                        print("\n" + "="*50 + "\n")
+            results.append(output)
+        
+        return {
+            "results": results,
+            "final_state": results[-1] if results else None
+        }
+    
+    def _update_conversation_state(self, result: Dict[str, Any]):
+        """Update conversation state based on workflow results."""
+        if not result.get("results"):
+            return
+            
+        # Check the final node that was executed
+        final_result = result["results"][-1]
+        final_node = list(final_result.keys())[0] if final_result else None
+        
+        if final_node == "smart_clarification":
+            self.waiting_for_clarification = True
+            self.last_clarification_type = "smart"
+            
+            # Add AI's clarification message to conversation history
+            if final_result[final_node].get("messages"):
+                ai_message = final_result[final_node]["messages"][0]
+                self.conversation_history.append(ai_message)
+                
+        elif final_node == "clarification":
+            self.waiting_for_clarification = True
+            self.last_clarification_type = "general"
+            
+            # Add AI's clarification message to conversation history
+            if final_result[final_node].get("messages"):
+                ai_message = final_result[final_node]["messages"][0]
+                self.conversation_history.append(ai_message)
+        else:
+            # Conversation completed normally
+            self.waiting_for_clarification = False
+            
+            # Add final AI response to history
+            if final_result.get(final_node, {}).get("messages"):
+                for message in final_result[final_node]["messages"]:
+                    self.conversation_history.append(message)
+    
+    def _extract_response(self, result: Dict[str, Any]) -> str:
+        """Extract the AI's response from workflow results."""
+        if not result.get("results"):
+            return "No response generated."
+            
+        final_result = result["results"][-1]
+        if not final_result:
+            return "Empty response."
+            
+        # Get the last node's output
+        for node_name, node_output in final_result.items():
+            if node_output.get("messages"):
+                return node_output["messages"][0].content
+                
+        return "Unable to extract response."
+    
+    def get_conversation_summary(self) -> Dict[str, Any]:
+        """Get a summary of the current conversation state."""
+        return {
+            "message_count": len(self.conversation_history),
+            "waiting_for_clarification": self.waiting_for_clarification,
+            "clarification_type": self.last_clarification_type,
+            "conversation_id": id(self),
+            "last_message_preview": (
+                self.conversation_history[-1].content[:100] + "..." 
+                if self.conversation_history and len(self.conversation_history[-1].content) > 100
+                else (self.conversation_history[-1].content if self.conversation_history else "No messages")
+            )
+        }
+    
+    def get_full_final_response(self) -> str:
+        """
+        Get the complete final AI response from the conversation.
+        
+        Returns:
+            Complete final AI response or empty string if none found
+        """
+        if not self.conversation_history:
+            return ""
+        
+        # Find the last AI message
+        for msg in reversed(self.conversation_history):
+            if isinstance(msg, AIMessage):
+                return msg.content
+        
+        return "No AI response found."
+    
+    def is_conversation_complete(self) -> bool:
+        """
+        Check if the conversation has completed successfully.
+        
+        Returns:
+            True if conversation completed (not waiting for clarification)
+        """
+        return not self.waiting_for_clarification
+    
+    def get_conversation_status(self) -> Dict[str, Any]:
+        """
+        Get detailed conversation status including completion and final response.
+        
+        Returns:
+            Dict with conversation status, completion state, and full response
+        """
+        status = {
+            "is_complete": self.is_conversation_complete(),
+            "waiting_for_clarification": self.waiting_for_clarification,
+            "message_count": len(self.conversation_history),
+            "conversation_id": id(self)
+        }
+        
+        if self.is_conversation_complete():
+            status["final_response"] = self.get_full_final_response()
+            status["status"] = "✅ COMPLETED"
+        else:
+            status["status"] = "⏳ WAITING FOR CLARIFICATION"
+            status["clarification_type"] = self.last_clarification_type
+        
+        return status
+    
+    def reset_conversation(self):
+        """Reset the conversation to start fresh."""
+        self.conversation_history = []
+        self.waiting_for_clarification = False
+        self.last_clarification_type = None
+        print("🔄 Conversation reset.")
+
+# ============================================================================
 # FACTORY FUNCTIONS FOR DIFFERENT USE CASES
 # ============================================================================
 
@@ -384,6 +672,43 @@ def create_investment_advisor(temperature: float = 0.0) -> AIAgentWorkflow:
         temperature=temperature,
         tools=[tavily_web_search]  # Could add financial data tools
     )
+
+# ============================================================================
+# CONVERSATION SESSION FACTORY FUNCTIONS
+# ============================================================================
+
+def create_conversation_session(agent_type: str = "basic", **kwargs) -> ConversationSession:
+    """
+    Create a conversation session with the specified agent type.
+    
+    Args:
+        agent_type: Type of agent ("basic", "research", "investment")
+        **kwargs: Additional arguments for agent creation
+        
+    Returns:
+        ConversationSession instance ready for multi-turn conversations
+    """
+    agent_factories = {
+        "basic": create_basic_agent,
+        "research": create_research_agent,
+        "investment": create_investment_advisor
+    }
+    
+    if agent_type not in agent_factories:
+        raise ValueError(f"Unknown agent type: {agent_type}. Choose from: {list(agent_factories.keys())}")
+    
+    agent = agent_factories[agent_type](**kwargs)
+    return ConversationSession(agent)
+
+def create_investment_conversation() -> ConversationSession:
+    """Create a conversation session optimized for investment advice."""
+    agent = create_investment_advisor()
+    return ConversationSession(agent)
+
+def create_research_conversation() -> ConversationSession:
+    """Create a conversation session optimized for research tasks."""
+    agent = create_research_agent()
+    return ConversationSession(agent)
 
 # ============================================================================
 # DEMO AND TESTING
@@ -408,14 +733,77 @@ def demo_workflow():
     results = agent.run_conversation(test_queries, verbose=True)
     return results
 
+def demo_conversation_session():
+    """
+    🗣️ DEMO: Multi-turn conversation with clarification support.
+    Shows how context is maintained across clarification cycles.
+    """
+    print("🗣️ CONVERSATIONAL AI DEMO")
+    print("="*50)
+    
+    # Create a conversation session
+    session = create_investment_conversation()
+    
+    print("1️⃣ Starting with a vague investment query...")
+    print("-"*50)
+    
+    # Start conversation with vague query
+    result1 = session.start_conversation(
+        "Help me with investing", 
+        verbose=True
+    )
+    
+    print(f"\n📊 Conversation State: {session.get_conversation_summary()}")
+    
+    if result1.get("waiting_for_clarification"):
+        print("\n2️⃣ AI asked for clarification! Providing detailed response...")
+        print("-"*50)
+        
+        # Continue with detailed clarification
+        detailed_response = """
+        Thanks for the questions! Here are the details:
+        
+        1. Investment goals: I'm saving for retirement, planning to retire in about 20 years
+        2. Risk tolerance: I prefer moderate risk - I want growth but can't afford major losses
+        3. Timeline: Long-term, 15-20 years until I need the money
+        4. Budget: I have about $10,000 to start with and can add $500/month
+        5. Experience: I'm a beginner with basic knowledge of stocks and mutual funds
+        
+        I'm particularly interested in index funds and ETFs. Should I focus on US markets or diversify internationally?
+        """
+        
+        result2 = session.continue_conversation(
+            detailed_response,
+            verbose=True
+        )
+        
+        # Show detailed final status
+        final_status = session.get_conversation_status()
+        print(f"\n{final_status['status']}")
+        print("="*60)
+        
+        if final_status["is_complete"]:
+            print("🎯 COMPLETE FINAL RESPONSE:")
+            print("-"*40)
+            print(final_status["final_response"])
+            print(f"\n📊 Total conversation turns: {final_status['message_count']}")
+        else:
+            print("⚠️ Still waiting for more clarification...")
+            print(f"Last response preview: {session.get_conversation_summary()['last_message_preview']}")
+        
+    return session
+
 if __name__ == "__main__":
     # Example usage patterns
-    print("Choose demo mode:")
-    print("1. Single query")
-    print("2. Multiple queries")
-    print("3. Custom agent configuration")
+    print("🤖 LangGraph Agent Demo - Choose your experience:")
+    print("="*55)
+    print("1. Single query (traditional)")
+    print("2. Multiple queries (batch)")
+    print("3. 🗣️  Conversational mode (with clarification support)")
+    print("4. Custom agent configuration")
+    print("5. 🚀 Automated conversation demo")
     
-    choice = input("Enter choice (1-3): ").strip()
+    choice = input("Enter choice (1-5): ").strip()
     
     if choice == "1":
         agent = create_basic_agent()
@@ -426,6 +814,34 @@ if __name__ == "__main__":
         demo_workflow()
         
     elif choice == "3":
+        print("\n🗣️ Starting interactive conversation session...")
+        session = create_conversation_session("investment")
+        
+        query = input("Enter your initial query: ")
+        result = session.start_conversation(query)
+        
+        # Interactive loop for clarification
+        while result.get("waiting_for_clarification"):
+            print(f"\n💡 The AI is waiting for more details...")
+            follow_up = input("Provide additional information: ")
+            result = session.continue_conversation(follow_up)
+            
+        # Show detailed completion status
+        status = session.get_conversation_status()
+        print(f"\n{status['status']}")
+        print("="*60)
+        
+        if status["is_complete"]:
+            print("🎯 FINAL AI RESPONSE:")
+            print("-"*40)
+            print(status["final_response"])
+            print("\n📊 CONVERSATION STATISTICS:")
+            print(f"   • Total messages: {status['message_count']}")
+            print(f"   • Session ID: {status['conversation_id']}")
+        else:
+            print("⚠️ Conversation incomplete (unexpected state)")
+        
+    elif choice == "4":
         print("Creating custom agent...")
         agent = AIAgentWorkflow(
             temperature=0.2,
@@ -435,6 +851,10 @@ if __name__ == "__main__":
         
         query = input("Enter your query: ")
         agent.run_query(query)
+        
+    elif choice == "5":
+        print("\n🚀 Running automated conversation demo...")
+        demo_conversation_session()
         
     else:
         print("Running default demo...")
