@@ -3,6 +3,9 @@ import os
 from typing import TypedDict, Annotated, Sequence, Optional, Dict, Any
 import operator
 import re
+import time
+import threading
+import sys
 from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
 from langchain_deepseek import ChatDeepSeek
 from langgraph.prebuilt import ToolNode
@@ -13,6 +16,47 @@ load_dotenv()
 
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY")
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
+
+# ============================================================================
+# UTILITIES
+# ============================================================================
+
+class WaitingSpinner:
+    """
+    🌀 ANIMATED WAITING SPINNER
+    Shows a spinning animation while the agent is processing.
+    """
+    
+    def __init__(self, message="🤖 AI is thinking"):
+        self.message = message
+        self.spinning = False
+        self.spinner_chars = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+        self.thread = None
+    
+    def start(self):
+        """Start the spinning animation."""
+        self.spinning = True
+        self.thread = threading.Thread(target=self._spin, daemon=True)
+        self.thread.start()
+    
+    def stop(self):
+        """Stop the spinning animation."""
+        self.spinning = False
+        if self.thread:
+            self.thread.join(timeout=0.1)
+        # Clear the line
+        sys.stdout.write('\r' + ' ' * (len(self.message) + 10) + '\r')
+        sys.stdout.flush()
+    
+    def _spin(self):
+        """Internal spinning animation loop."""
+        idx = 0
+        while self.spinning:
+            char = self.spinner_chars[idx % len(self.spinner_chars)]
+            sys.stdout.write(f'\r{char} {self.message}...')
+            sys.stdout.flush()
+            time.sleep(0.1)
+            idx += 1
 
 # ============================================================================
 # TOOLS
@@ -87,9 +131,19 @@ class AIAgentWorkflow:
         
         Uses DeepSeek reasoner to determine if ANY query needs clarification.
         Works for all topics, not just investments.
+        
+        🚫 CLARIFICATION LIMIT: Max 2 rounds to prevent endless questions.
         """
         messages = state.get('messages', [])
         if not messages:
+            return "proceed_to_agent"
+        
+        # Check if we've reached max clarification rounds
+        clarification_count = getattr(self, '_clarification_rounds', 0)
+        max_rounds = getattr(self, '_max_clarification_rounds', 2)
+        
+        if clarification_count >= max_rounds:
+            print(f"🛑 Max clarification rounds ({max_rounds}) reached. Proceeding to final answer...")
             return "proceed_to_agent"
         
         # Get the user's query
@@ -113,6 +167,7 @@ class AIAgentWorkflow:
         analysis_prompt = f"""You are a query analysis expert. Your job is to determine if a user's question needs clarification to provide the best possible answer.
 
 USER QUERY: "{user_message}"
+CLARIFICATION ROUND: {clarification_count + 1} of {max_rounds} (be selective!)
 
 Analyze this query and determine:
 1. Is this query specific enough to provide a comprehensive answer?
@@ -130,6 +185,9 @@ Guidelines for when NOT to ask for clarification:
 - Factual questions with clear answers (e.g., "What is the capital of France?")
 - Specific technical questions (e.g., "How to install Python on macOS?")
 - General information requests that don't require personalization
+- We already have sufficient information to provide a good answer
+
+IMPORTANT: Since this is round {clarification_count + 1} of {max_rounds}, be extra selective. Only ask for clarification if it's absolutely essential for providing value.
 
 Respond with a JSON object:
 {{
@@ -179,19 +237,31 @@ Be selective - only ask for clarification when it would genuinely improve the an
         follow_up_questions = analysis.get('follow_up_questions', [])
         reason = analysis.get('reason', 'I need more information to help you better.')
         
-        # Format the follow-up questions nicely
-        questions_text = ""
+        # Simple, clean formatting without decorative lines
+        clarification_count = getattr(self, '_clarification_rounds', 0)
+        max_rounds = getattr(self, '_max_clarification_rounds', 2)
+        
+        content_parts = [reason, ""]
+        
         if follow_up_questions:
-            questions_text = "\n\n**To give you the best recommendations, could you please share:**\n\n"
+            content_parts.append(f"📋 To provide the best recommendations, please share: (Round {clarification_count + 1}/{max_rounds})")
+            content_parts.append("")
+            
             for i, question in enumerate(follow_up_questions, 1):
-                questions_text += f"{i}. {question}\n"
+                content_parts.append(f"❓ {i}. {question}")
+            
+            content_parts.append("")
+            if clarification_count + 1 >= max_rounds:
+                content_parts.append("🏁 This is the final clarification round - I'll provide a comprehensive answer based on your response!")
+            else:
+                content_parts.append("💡 The more details you provide, the more personalized my advice will be!")
+            content_parts.append("")
+            content_parts.append("🎯 Ready when you are! Just answer the questions above.")
         
-        clarification_msg = AIMessage(
-            content=f"""{reason}{questions_text}
-
-The more specific details you provide, the more tailored and useful my recommendations will be! 🎯"""
-        )
+        # Join with spaces instead of newlines for better compatibility
+        formatted_content = " ".join(content_parts)
         
+        clarification_msg = AIMessage(content=formatted_content)
         return {"messages": [clarification_msg]}
     
     def should_continue(self, state):
@@ -354,15 +424,25 @@ The more specific details you provide, the more tailored and useful my recommend
         app = self.compile_workflow()
         inputs = {"messages": [HumanMessage(content=query)]}
         
-        results = []
-        for output in app.stream(inputs):
-            if verbose:
-                for key, value in output.items():
-                    print(f"Output from node '{key}':")
-                    print("---")
-                    print(value)
-                    print("\n" + "="*50 + "\n")
-            results.append(output)
+        # Start processing animation
+        spinner = WaitingSpinner("🤖 Processing your query")
+        spinner.start()
+        
+        try:
+            results = []
+            for output in app.stream(inputs):
+                if verbose:
+                    for key, value in output.items():
+                        spinner.stop()  # Stop spinner before printing
+                        print(f"Output from node '{key}':")
+                        print("---")
+                        print(value)
+                        print("\n" + "="*50 + "\n")
+                        spinner = WaitingSpinner("🤖 Processing next step")
+                        spinner.start()
+                results.append(output)
+        finally:
+            spinner.stop()
         
         return {
             "query": query,
@@ -435,6 +515,8 @@ class ConversationSession:
         self.conversation_history = []
         self.waiting_for_clarification = False
         self.last_clarification_type = None
+        self.clarification_rounds = 0  # Track number of clarification rounds
+        self.max_clarification_rounds = 2  # Limit to 2 rounds max
         
     def start_conversation(self, initial_query: str, verbose: bool = True) -> Dict[str, Any]:
         """
@@ -448,26 +530,40 @@ class ConversationSession:
             Dict containing response and conversation state
         """
         print(f"🚀 Starting conversation: '{initial_query}'")
+        print("📝 Initializing conversation session...")
         
         # Clear any previous conversation
         self.conversation_history = []
         self.waiting_for_clarification = False
+        self.clarification_rounds = 0  # Reset clarification counter
         
         # Add initial query to history
         initial_message = HumanMessage(content=initial_query)
         self.conversation_history.append(initial_message)
         
-        # Run the workflow
+        # Set clarification tracking on the agent
+        self.agent._clarification_rounds = self.clarification_rounds
+        self.agent._max_clarification_rounds = self.max_clarification_rounds
+        
+        # Run the workflow with progress indication
+        print("🔍 Analyzing your query...")
         result = self._run_workflow_with_history(verbose)
         
         # Check if we're waiting for clarification
         self._update_conversation_state(result)
         
+        # Show completion status
+        if self.waiting_for_clarification:
+            print(f"✅ Analysis complete! Follow-up questions generated. (Round {self.clarification_rounds + 1}/{self.max_clarification_rounds})")
+        else:
+            print("✅ Response complete!")
+        
         return {
             "response": self._extract_response(result),
             "waiting_for_clarification": self.waiting_for_clarification,
             "conversation_id": id(self),
-            "message_count": len(self.conversation_history)
+            "message_count": len(self.conversation_history),
+            "clarification_round": self.clarification_rounds
         }
     
     def continue_conversation(self, user_response: str, verbose: bool = True) -> Dict[str, Any]:
@@ -488,25 +584,43 @@ class ConversationSession:
             }
         
         print(f"💬 Continuing conversation with: '{user_response[:100]}...'")
+        print("📥 Processing your detailed response...")
         
         # Add user's clarification response to history
         clarification_message = HumanMessage(content=user_response)
         self.conversation_history.append(clarification_message)
         
+        # Increment clarification rounds and update agent
+        self.clarification_rounds += 1
+        self.agent._clarification_rounds = self.clarification_rounds
+        self.agent._max_clarification_rounds = self.max_clarification_rounds
+        
         # Reset clarification state
         self.waiting_for_clarification = False
         
         # Run workflow again with enriched context
+        if self.clarification_rounds >= self.max_clarification_rounds:
+            print("🧠 Generating final recommendations... (Max clarification rounds reached)")
+        else:
+            print("🧠 Generating personalized recommendations...")
+        
         result = self._run_workflow_with_history(verbose)
         
-        # Check if we need more clarification (unlikely but possible)
+        # Check if we need more clarification (limited by max rounds)
         self._update_conversation_state(result)
+        
+        # Show completion status
+        if self.waiting_for_clarification:
+            print(f"⚠️  Additional clarification needed. (Round {self.clarification_rounds + 1}/{self.max_clarification_rounds})")
+        else:
+            print("✅ Personalized recommendations ready!")
         
         return {
             "response": self._extract_response(result),
             "waiting_for_clarification": self.waiting_for_clarification,
             "conversation_id": id(self),
-            "message_count": len(self.conversation_history)
+            "message_count": len(self.conversation_history),
+            "clarification_round": self.clarification_rounds
         }
     
     def _run_workflow_with_history(self, verbose: bool) -> Dict[str, Any]:
@@ -514,16 +628,26 @@ class ConversationSession:
         app = self.agent.compile_workflow()
         inputs = {"messages": self.conversation_history.copy()}
         
-        results = []
-        for output in app.stream(inputs):
-            if verbose:
-                for key, value in output.items():
-                    if key != "query_router":  # Skip empty router output
-                        print(f"Output from node '{key}':")
-                        print("---")
-                        print(value)
-                        print("\n" + "="*50 + "\n")
-            results.append(output)
+        # Start waiting animation
+        spinner = WaitingSpinner("🤖 AI is analyzing and preparing response")
+        spinner.start()
+        
+        try:
+            results = []
+            for output in app.stream(inputs):
+                if verbose:
+                    for key, value in output.items():
+                        if key != "query_router":  # Skip empty router output
+                            spinner.stop()  # Stop spinner before printing
+                            print(f"Output from node '{key}':")
+                            print("---")
+                            print(value)
+                            print("\n" + "="*50 + "\n")
+                            spinner = WaitingSpinner("🤖 AI is processing next step")
+                            spinner.start()
+                results.append(output)
+        finally:
+            spinner.stop()
         
         return {
             "results": results,
@@ -587,6 +711,8 @@ class ConversationSession:
             "message_count": len(self.conversation_history),
             "waiting_for_clarification": self.waiting_for_clarification,
             "clarification_type": self.last_clarification_type,
+            "clarification_rounds": self.clarification_rounds,
+            "max_clarification_rounds": self.max_clarification_rounds,
             "conversation_id": id(self),
             "last_message_preview": (
                 self.conversation_history[-1].content[:100] + "..." 
@@ -649,6 +775,7 @@ class ConversationSession:
         self.conversation_history = []
         self.waiting_for_clarification = False
         self.last_clarification_type = None
+        self.clarification_rounds = 0
         print("🔄 Conversation reset.")
 
 # ============================================================================
@@ -737,9 +864,10 @@ def demo_conversation_session():
     """
     🗣️ DEMO: Multi-turn conversation with clarification support.
     Shows how context is maintained across clarification cycles.
+    🚫 LIMITED TO 2 CLARIFICATION ROUNDS to prevent endless questions.
     """
-    print("🗣️ CONVERSATIONAL AI DEMO")
-    print("="*50)
+    print("🗣️ CONVERSATIONAL AI DEMO WITH LIMITED CLARIFICATION ROUNDS")
+    print("="*60)
     
     # Create a conversation session
     session = create_investment_conversation()
@@ -786,10 +914,13 @@ def demo_conversation_session():
             print("🎯 COMPLETE FINAL RESPONSE:")
             print("-"*40)
             print(final_status["final_response"])
-            print(f"\n📊 Total conversation turns: {final_status['message_count']}")
+            print(f"\n📊 CONVERSATION STATISTICS:")
+            print(f"   • Total messages: {final_status['message_count']}")
+            print(f"   • Clarification rounds used: {session.clarification_rounds}/{session.max_clarification_rounds}")
         else:
             print("⚠️ Still waiting for more clarification...")
-            print(f"Last response preview: {session.get_conversation_summary()['last_message_preview']}")
+            print(f"   • Clarification rounds: {session.clarification_rounds}/{session.max_clarification_rounds}")
+            print(f"   • Last response preview: {session.get_conversation_summary()['last_message_preview']}")
         
     return session
 
@@ -798,12 +929,9 @@ if __name__ == "__main__":
     print("🤖 LangGraph Agent Demo - Choose your experience:")
     print("="*55)
     print("1. Single query (traditional)")
-    print("2. Multiple queries (batch)")
-    print("3. 🗣️  Conversational mode (with clarification support)")
-    print("4. Custom agent configuration")
-    print("5. 🚀 Automated conversation demo")
+    print("2. 🗣️  Conversational mode (with clarification support)")
     
-    choice = input("Enter choice (1-5): ").strip()
+    choice = input("Enter choice (1 or 2): ").strip()
     
     if choice == "1":
         agent = create_basic_agent()
@@ -811,9 +939,6 @@ if __name__ == "__main__":
         agent.run_query(query)
         
     elif choice == "2":
-        demo_workflow()
-        
-    elif choice == "3":
         print("\n🗣️ Starting interactive conversation session...")
         session = create_conversation_session("investment")
         
@@ -841,21 +966,9 @@ if __name__ == "__main__":
         else:
             print("⚠️ Conversation incomplete (unexpected state)")
         
-    elif choice == "4":
-        print("Creating custom agent...")
-        agent = AIAgentWorkflow(
-            temperature=0.2,
-            model_name="deepseek-reasoner"
-        )
-        print(f"Custom agent info: {agent.get_workflow_info()}")
-        
-        query = input("Enter your query: ")
-        agent.run_query(query)
-        
-    elif choice == "5":
-        print("\n🚀 Running automated conversation demo...")
-        demo_conversation_session()
-        
     else:
-        print("Running default demo...")
-        demo_workflow() 
+        print("Invalid choice. Please enter 1 or 3.")
+        print("Running single query demo...")
+        agent = create_basic_agent()
+        query = input("Enter your query: ")
+        agent.run_query(query) 
