@@ -450,30 +450,6 @@ Be selective - only ask for clarification when it would genuinely improve the an
             "final_state": results[-1] if results else None
         }
     
-    def run_conversation(self, queries: list, verbose: bool = True) -> list:
-        """
-        Run multiple queries in sequence (useful for testing).
-        
-        Args:
-            queries: List of query strings
-            verbose: Whether to print outputs
-            
-        Returns:
-            List of results for each query
-        """
-        conversation_results = []
-        
-        for i, query in enumerate(queries):
-            print(f"\n🔍 QUERY {i+1}: {query}")
-            print("="*60)
-            
-            result = self.run_query(query, verbose)
-            conversation_results.append(result)
-            
-            print("\n" + "🏁 COMPLETED" + "\n")
-        
-        return conversation_results
-    
     # ========================================================================
     # UTILITY METHODS
     # ========================================================================
@@ -487,10 +463,6 @@ Be selective - only ask for clarification when it would genuinely improve the an
             "node_count": len(self.create_workflow().nodes) if self.app is None else len(self.app.get_graph().nodes),
             "compiled": self.app is not None
         }
-    
-    def reset_workflow(self):
-        """Reset the compiled workflow (useful for configuration changes)."""
-        self.app = None
 
 # ============================================================================
 # CONVERSATION SESSION MANAGER
@@ -769,14 +741,6 @@ class ConversationSession:
             status["clarification_type"] = self.last_clarification_type
         
         return status
-    
-    def reset_conversation(self):
-        """Reset the conversation to start fresh."""
-        self.conversation_history = []
-        self.waiting_for_clarification = False
-        self.last_clarification_type = None
-        self.clarification_rounds = 0
-        print("🔄 Conversation reset.")
 
 # ============================================================================
 # FACTORY FUNCTIONS FOR DIFFERENT USE CASES
@@ -836,93 +800,6 @@ def create_research_conversation() -> ConversationSession:
     """Create a conversation session optimized for research tasks."""
     agent = create_research_agent()
     return ConversationSession(agent)
-
-# ============================================================================
-# DEMO AND TESTING
-# ============================================================================
-
-def demo_workflow():
-    """Demonstrate the workflow with various query types."""
-    agent = create_research_agent()
-    
-    print("🚀 AI AGENT WORKFLOW DEMO")
-    print("="*50)
-    print(f"Configuration: {agent.get_workflow_info()}")
-    print("\n")
-    
-    # Test queries
-    test_queries = [
-        "How to learn AI agent creation?",
-        "What are some good conservative investment options?",
-        "Could you recommend some good stocks?",  # Should trigger investment clarification
-    ]
-    
-    results = agent.run_conversation(test_queries, verbose=True)
-    return results
-
-def demo_conversation_session():
-    """
-    🗣️ DEMO: Multi-turn conversation with clarification support.
-    Shows how context is maintained across clarification cycles.
-    🚫 LIMITED TO 2 CLARIFICATION ROUNDS to prevent endless questions.
-    """
-    print("🗣️ CONVERSATIONAL AI DEMO WITH LIMITED CLARIFICATION ROUNDS")
-    print("="*60)
-    
-    # Create a conversation session
-    session = create_investment_conversation()
-    
-    print("1️⃣ Starting with a vague investment query...")
-    print("-"*50)
-    
-    # Start conversation with vague query
-    result1 = session.start_conversation(
-        "Help me with investing", 
-        verbose=True
-    )
-    
-    print(f"\n📊 Conversation State: {session.get_conversation_summary()}")
-    
-    if result1.get("waiting_for_clarification"):
-        print("\n2️⃣ AI asked for clarification! Providing detailed response...")
-        print("-"*50)
-        
-        # Continue with detailed clarification
-        detailed_response = """
-        Thanks for the questions! Here are the details:
-        
-        1. Investment goals: I'm saving for retirement, planning to retire in about 20 years
-        2. Risk tolerance: I prefer moderate risk - I want growth but can't afford major losses
-        3. Timeline: Long-term, 15-20 years until I need the money
-        4. Budget: I have about $10,000 to start with and can add $500/month
-        5. Experience: I'm a beginner with basic knowledge of stocks and mutual funds
-        
-        I'm particularly interested in index funds and ETFs. Should I focus on US markets or diversify internationally?
-        """
-        
-        result2 = session.continue_conversation(
-            detailed_response,
-            verbose=True
-        )
-        
-        # Show detailed final status
-        final_status = session.get_conversation_status()
-        print(f"\n{final_status['status']}")
-        print("="*60)
-        
-        if final_status["is_complete"]:
-            print("🎯 COMPLETE FINAL RESPONSE:")
-            print("-"*40)
-            print(final_status["final_response"])
-            print(f"\n📊 CONVERSATION STATISTICS:")
-            print(f"   • Total messages: {final_status['message_count']}")
-            print(f"   • Clarification rounds used: {session.clarification_rounds}/{session.max_clarification_rounds}")
-        else:
-            print("⚠️ Still waiting for more clarification...")
-            print(f"   • Clarification rounds: {session.clarification_rounds}/{session.max_clarification_rounds}")
-            print(f"   • Last response preview: {session.get_conversation_summary()['last_message_preview']}")
-        
-    return session
 
 if __name__ == "__main__":
     # Example usage patterns
